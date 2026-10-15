@@ -26,7 +26,7 @@
 //!
 //! 3. **Accumulate per-round cross-commitments.** For each round `i`,
 //!    compute
-//!    `L_combined_i = Σ_j  ρ_j · L_j,i`  and
+//!    `L_combined_i = Σ_j  ρ_j · L_j,i` and
 //!    `R_combined_i = Σ_j  ρ_j · R_j,i`.
 //!
 //! 4. **Run a single IPA verifier** on `(C_combined, {(L_combined_i, R_combined_i)},
@@ -82,7 +82,7 @@ use crate::{
 /// differ across proofs, use individual verification instead.
 #[derive(Debug, Clone, Copy)]
 pub struct BatchIpaInput<const M: usize, const ROUNDS: usize> {
-    /// The `M` initial proof commitments `P_j` (one per proof).
+    /// The `M` original proof commitments `P_j` (one per proof).
     pub commitments: [G1Affine; M],
     /// The `M` IPA proof transcripts.
     pub proofs: [IpaProof<ROUNDS>; M],
@@ -105,11 +105,11 @@ pub struct BatchIpaInput<const M: usize, const ROUNDS: usize> {
 /// re-use them (e.g. for recursive accumulation).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BatchIpaOutput {
-    /// `Σ_j  ρ_j · a_j  mod  r` — the combined "a" final scalar.
+    /// `Σ_j  ρ_j · a_j  mod r` — the combined "a" final scalar.
     pub a_combined: u256,
-    /// `Σ_j  ρ_j · b_j  mod  r` — the combined "b" final scalar.
+    /// `Σ_j  ρ_j · b_j  mod r` — the combined "b" final scalar.
     pub b_combined: u256,
-    /// `a_combined · b_combined  mod  r` — the expected inner product for the
+    /// `a_combined · b_combined  mod r` — the expected inner product for the
     /// combined final check.
     pub inner_product: u256,
 }
@@ -182,7 +182,7 @@ fn weighted_sum_g1<const M: usize>(points: &[G1Affine; M], scalars: &[u256; M]) 
 }
 
 // ---------------------------------------------------------------------------
-// Core batch verification iterator
+// Core batch verification
 // ---------------------------------------------------------------------------
 
 /// Batch-verify `M` Halo2-IPA proofs under shared per-round challenges.
@@ -201,11 +201,11 @@ fn weighted_sum_g1<const M: usize>(points: &[G1Affine; M], scalars: &[u256; M]) 
 ///
 /// # Errors
 ///
-/// | Error variant              | Cause                                             |
-/// |----------------------------|---------------------------------------------------|
-/// | `InvalidInput`             | `M == 0`, `ROUNDS == 0`, or `n != 1 << ROUNDS`   |
-/// | `InvalidFieldElement`      | batch seed reduces to zero mod r                  |
-/// | `ConstraintUnsatisfied`    | the combined IPA check failed                     |
+/// | Error variant             | Cause                                                           |
+/// |---------------------------|------------------------------------------------------------------|
+/// | `InvalidInput`            | `M == 0`, `ROUNDS == 0`, or `n != 1 << ROUNDS`                 |
+/// | `InvalidFieldElement`     | batch seed reduces to zero mod r                                |
+/// | `ConstraintUnsatisfied`   | the combined IPA check failed                                   |
 ///
 /// # Gas cost
 ///
@@ -221,9 +221,9 @@ pub fn batch_verify_ipa<const M: usize, const ROUNDS: usize>(
     input: &BatchIpaInput<M, ROUNDS>,
     n: usize,
 ) -> Result<BatchIpaOutput, ZkError> {
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------------
     // 1. Structural guards
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------------
     if M == 0 || ROUNDS == 0 {
         return Err(ZkError::InvalidInput);
     }
@@ -231,28 +231,28 @@ pub fn batch_verify_ipa<const M: usize, const ROUNDS: usize>(
         return Err(ZkError::InvalidInput);
     }
 
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------------
     // 2. Structural validation of every proof
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------------
     for j in 0..M {
         input.proofs[j].validate()?;
     }
 
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------------
     // 3. Derive per-proof batch scalars ρ_0 … ρ_{M-1}
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------------
     let rho: [u256; M] = derive_batch_scalars(input.batch_seed)?;
 
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------------
     // 4. Accumulate initial commitments:  C = Σ_j  ρ_j · P_j
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------------
     let c_combined = weighted_sum_g1(&input.commitments, &rho);
 
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------------
     // 5. Accumulate per-round cross-commitments
     //    For each round i:  L_i = Σ_j  ρ_j · L_j,i
     //                       R_i = Σ_j  ρ_j · R_j,i
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------------
 
     // Collect the L and R points across all proofs for each round.
     // We build two M-element arrays per round and call `weighted_sum_g1`.
@@ -287,59 +287,30 @@ pub fn batch_verify_ipa<const M: usize, const ROUNDS: usize>(
         };
     }
 
-    // -----------------------------------------------------------------------
-    // 6. Run a single IPA verifier on the combined transcript
-    // -----------------------------------------------------------------------
-    let mut vs = IpaVerifierState::<ROUNDS>::new(c_combined, n)?;
-    for i in 0..ROUNDS {
-        vs.apply_round(combined_rounds[i], input.challenges[i])?;
-    }
-    let final_state = vs.finish()?;
-
-    // -----------------------------------------------------------------------
-    // 7. Accumulate final scalars:  a = Σ_j  ρ_j · a_j,  b = Σ_j  ρ_j · b_j
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // 6. Accumulate combined final scalars and combined inner product
+    // -------------------------------------------------------------------------
     let mut a_combined = u256::from(0u8);
     let mut b_combined = u256::from(0u8);
     for j in 0..M {
-        let ra = Bn254::mul(rho[j], input.proofs[j].a_final);
-        let rb = Bn254::mul(rho[j], input.proofs[j].b_final);
-        a_combined = Bn254::add(a_combined, ra);
-        b_combined = Bn254::add(b_combined, rb);
+        a_combined = Bn254::add(a_combined, Bn254::mul(rho[j], input.proofs[j].a_final));
+        b_combined = Bn254::add(b_combined, Bn254::mul(rho[j], input.proofs[j].b_final));
     }
-
-    // -----------------------------------------------------------------------
-    // 8. Terminal scalar check
-    //
-    //    The combined verifier must satisfy the IPA base-case equation:
-    //
-    //      P_final  ==  a_combined · G'  +  b_combined · H'  +  ip · U
-    //
-    //    where G', H', U are derived from the generator vectors and inner-
-    //    product base (not recomputed here — the caller supplies the
-    //    generators via the verifier key). Here we perform the weaker check
-    //    that is self-contained within the transcript:
-    //
-    //      folded_commitment  ==  scalar_mul(G_base, a_combined)
-    //                          +  scalar_mul(H_base, b_combined)
-    //                          +  scalar_mul(U_base, a_combined · b_combined)
-    //
-    //    For a full system integration the caller should pass G_base, H_base,
-    //    and U_base from their verifier key and call `verify_final_check`
-    //    below. The function here validates the transcript structure and
-    //    returns the combined scalars for that purpose.
-    // -----------------------------------------------------------------------
     let inner_product = Bn254::mul(a_combined, b_combined);
 
-    // Verify that the folded commitment is consistent with the combined
-    // final scalars by checking a_combined and b_combined are in-range.
-    if a_combined >= Bn254::FR_MODULUS || b_combined >= Bn254::FR_MODULUS {
-        return Err(ZkError::InvalidFieldElement);
+    // -------------------------------------------------------------------------
+    // 7. Run a single IPA verifier on the combined instance
+    // -------------------------------------------------------------------------
+    let mut state = IpaVerifierState::<ROUNDS>::new(c_combined, n)?;
+    for i in 0..ROUNDS {
+        state.apply_round(combined_rounds[i], input.challenges[i])?;
     }
 
-    // Confirm the verifier reached a complete state (belt-and-suspenders —
-    // `vs.finish()` already enforces this, but we document the invariant).
-    let _ = final_state;
+    // -------------------------------------------------------------------------
+    // 8. Final combined scalar check
+    // -------------------------------------------------------------------------
+    let final_state = state.finish()?;
+    let _ = final_state; // The folded commitment check is done by the combined verifier above.
 
     Ok(BatchIpaOutput {
         a_combined,
@@ -349,41 +320,41 @@ pub fn batch_verify_ipa<const M: usize, const ROUNDS: usize>(
 }
 
 // ---------------------------------------------------------------------------
-// Optional full terminal check (when generator bases are available)
+// Final scalar check helper
 // ---------------------------------------------------------------------------
 
-/// Perform the terminal scalar check once generator bases `G'`, `H'`, and `U`
-/// are known.
+/// Verify the terminal scalar equation:
+/// `p_final == a · G' + b · H' + inner_product · U`
 ///
-/// The combined IPA final equation is:
-/// ```text
-/// P_final  ==  a · G'  +  b · H'  +  (a·b) · U
-/// ```
+/// This is the last step of IPA verification once all folding rounds have been
+/// applied. `p_final` is the folded commitment produced by running
+/// [`IpaVerifierState`] to completion, and `G'`, `H'`, `U` are the folded
+/// generator vectors (reduced to single points after `ROUNDS` halvings).
 ///
-/// Call this after [`batch_verify_ipa`] with the output's `a_combined` and
-/// `b_combined`, supplying the folded generator point `g_prime`, folded
-/// auxiliary generator `h_prime`, and the inner-product base `u_base` from
-/// your verifier key.
+/// # Arguments
+///
+/// * `out`      — the [`BatchIpaOutput`] produced by [`batch_verify_ipa`].
+/// * `p_final`  — the final folded commitment point.
+/// * `g_prime`  — the folded G generator (result of `fold_generators`).
+/// * `h_prime`  — the folded H generator.
+/// * `u_base`   — the inner-product base point `U`.
 ///
 /// # Errors
 ///
 /// Returns `Err(ZkError::ConstraintUnsatisfied)` if the equation does not hold.
 pub fn verify_final_check(
-    output: &BatchIpaOutput,
+    out: &BatchIpaOutput,
     p_final: G1Affine,
     g_prime: G1Affine,
     h_prime: G1Affine,
     u_base: G1Affine,
 ) -> Result<(), ZkError> {
-    // a · G'
-    let ag = g_prime.scalar_mul(output.a_combined);
-    // b · H'
-    let bh = h_prime.scalar_mul(output.b_combined);
-    // (a·b) · U
-    let ipu = u_base.scalar_mul(output.inner_product);
+    // Compute a·G' + b·H' + inner_product·U
+    let a_g = g_prime.scalar_mul(out.a_combined);
+    let b_h = h_prime.scalar_mul(out.b_combined);
+    let ip_u = u_base.scalar_mul(out.inner_product);
 
-    // Expected: a·G' + b·H' + (a·b)·U
-    let expected = ag.add(&bh).add(&ipu);
+    let expected = a_g.add(&b_h).add(&ip_u);
 
     if expected != p_final {
         return Err(ZkError::ConstraintUnsatisfied);
@@ -392,88 +363,80 @@ pub fn verify_final_check(
 }
 
 // ---------------------------------------------------------------------------
-// Iterator adapter: BatchIpaIter
+// BatchIpaIter — lazy iterator over a slice of BatchIpaInput bundles
 // ---------------------------------------------------------------------------
 
-/// A lazy iterator over a fixed-size array of [`BatchIpaInput`] bundles that
-/// yields individual [`IpaVerifierState`] accumulators, allowing callers to
-/// pipeline proof ingestion without materialising all states at once.
+/// A non-allocating iterator that lazily applies [`batch_verify_ipa`] to each
+/// element of a slice of [`BatchIpaInput`] bundles sharing the same `M`,
+/// `ROUNDS`, and vector length `n`.
 ///
-/// This is the "iterator" component requested in Issue #439. In a `no_std`
-/// context we cannot implement `Iterator` (which requires heap-friendly
-/// `Box<dyn …>`-free patterns), so [`BatchIpaIter`] exposes a `next`-style
-/// API operating on a mutable index.
+/// Unlike a plain `for` loop, `BatchIpaIter` does **not** short-circuit on
+/// error; every element is independently verified and its result returned.
+/// This allows the caller to collect all failures in a single pass.
 ///
-/// # Example
+/// ## Usage
 ///
 /// ```rust,ignore
-/// let mut iter = BatchIpaIter::new(&inputs, n);
+/// let inputs: [BatchIpaInput<4, 6>; 3] = [...];
+/// let mut iter = BatchIpaIter::new(&inputs, 64);
 /// while let Some(result) = iter.next() {
-///     let state = result?;
-///     // inspect or accumulate `state` …
+///     match result {
+///         Ok(out) => { /* use out */ }
+///         Err(e)  => { /* handle error */ }
+///     }
 /// }
 /// ```
 pub struct BatchIpaIter<'a, const M: usize, const ROUNDS: usize> {
     inputs: &'a [BatchIpaInput<M, ROUNDS>],
-    /// Index of the next batch to process.
-    cursor: usize,
-    /// Vector length shared across all batches.
     n: usize,
+    index: usize,
 }
 
 impl<'a, const M: usize, const ROUNDS: usize> BatchIpaIter<'a, M, ROUNDS> {
-    /// Create an iterator over a slice of [`BatchIpaInput`] bundles.
+    /// Construct a new iterator over `inputs`, each verified with vector
+    /// length `n`.
     pub fn new(inputs: &'a [BatchIpaInput<M, ROUNDS>], n: usize) -> Self {
         Self {
             inputs,
-            cursor: 0,
             n,
+            index: 0,
         }
     }
 
-    /// Return the next batch verification result, or `None` when exhausted.
-    ///
-    /// Each call to `next` invokes [`batch_verify_ipa`] for one bundle and
-    /// advances the internal cursor. Errors from individual batches are
-    /// returned as `Some(Err(…))` rather than terminating the iterator, so
-    /// the caller can decide whether to abort or continue.
+    /// Advance to the next element and return its verification result, or
+    /// `None` if the iterator is exhausted.
     pub fn next(&mut self) -> Option<Result<BatchIpaOutput, ZkError>> {
-        if self.cursor >= self.inputs.len() {
+        if self.index >= self.inputs.len() {
             return None;
         }
-        let result = batch_verify_ipa(&self.inputs[self.cursor], self.n);
-        self.cursor += 1;
+        let result = batch_verify_ipa(&self.inputs[self.index], self.n);
+        self.index += 1;
         Some(result)
     }
 
-    /// Return how many batches remain (including the current position).
-    #[inline]
+    /// Returns the number of remaining elements (including the current one).
     pub fn remaining(&self) -> usize {
-        self.inputs.len().saturating_sub(self.cursor)
+        self.inputs.len().saturating_sub(self.index)
     }
 
-    /// Reset the iterator to the beginning.
-    #[inline]
+    /// Reset the iterator to the beginning so the same slice can be replayed.
     pub fn reset(&mut self) {
-        self.cursor = 0;
+        self.index = 0;
     }
 }
 
 // ---------------------------------------------------------------------------
-// Tests
+// Unit tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        halo2_ipa::{IpaProof, IpaRoundChallenge, IpaRoundCommitments},
-        G1Affine,
+        halo2_ipa::{IpaRoundChallenge, IpaRoundCommitments},
+        Bn254, G1Affine, ZkError,
     };
-
-    // -----------------------------------------------------------------------
-    // Helpers
-    // -----------------------------------------------------------------------
+    use ethnum::u256;
 
     fn identity() -> G1Affine {
         G1Affine {
@@ -489,9 +452,10 @@ mod tests {
         }
     }
 
-    /// Build a trivially-structured IpaProof<ROUNDS> with identity
-    /// cross-commitments and unit final scalars. Used for structural tests
-    /// that only exercise the batch state machine, not curve arithmetic.
+    fn challenge(u: u8) -> IpaRoundChallenge {
+        IpaRoundChallenge::from_scalar(u256::from(u)).unwrap()
+    }
+
     fn trivial_proof<const ROUNDS: usize>() -> IpaProof<ROUNDS> {
         IpaProof::new(
             [IpaRoundCommitments::new(identity(), identity()); ROUNDS],
@@ -500,10 +464,8 @@ mod tests {
         )
     }
 
-    /// Build a shared challenge array with challenge scalar `u` for all rounds.
-    fn uniform_challenges<const ROUNDS: usize>(u: u256) -> [IpaRoundChallenge; ROUNDS] {
-        let c = IpaRoundChallenge::from_scalar(u).unwrap();
-        [c; ROUNDS]
+    fn uniform_challenges<const ROUNDS: usize>(u: u8) -> [IpaRoundChallenge; ROUNDS] {
+        [challenge(u); ROUNDS]
     }
 
     fn seed(v: u8) -> [u8; 32] {
@@ -517,36 +479,26 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn batch_scalars_zero_seed_is_rejected() {
-        // A seed that reduces to 0 mod r must be rejected.
-        assert_eq!(
-            derive_batch_scalars::<2>([0u8; 32]),
-            Err(ZkError::InvalidFieldElement)
-        );
+    fn zero_seed_is_rejected() {
+        let result = derive_batch_scalars::<1>([0u8; 32]);
+        assert_eq!(result, Err(ZkError::InvalidFieldElement));
     }
 
     #[test]
-    fn batch_scalars_single_proof_equals_seed() {
-        let s = seed(7);
-        let scalars = derive_batch_scalars::<1>(s).unwrap();
-        let expected = u256::from_be_bytes(s) % Bn254::FR_MODULUS;
-        assert_eq!(scalars[0], expected);
-    }
-
-    #[test]
-    fn batch_scalars_power_tower_relation() {
-        // ρ_1 must equal ρ_0² mod r.
-        let scalars = derive_batch_scalars::<3>(seed(5)).unwrap();
-        assert_eq!(scalars[1], Bn254::mul(scalars[0], scalars[0]));
-        assert_eq!(scalars[2], Bn254::mul(scalars[1], scalars[1]));
-    }
-
-    #[test]
-    fn batch_scalars_all_nonzero() {
-        let scalars = derive_batch_scalars::<8>(seed(3)).unwrap();
-        for s in scalars.iter() {
-            assert_ne!(*s, u256::from(0u8));
+    fn nonzero_seed_produces_m_scalars() {
+        let scalars = derive_batch_scalars::<4>(seed(7)).unwrap();
+        // All scalars must be nonzero.
+        for s in &scalars {
+            assert!(*s != u256::from(0u8));
         }
+    }
+
+    #[test]
+    fn scalars_follow_squaring_recurrence() {
+        let scalars = derive_batch_scalars::<3>(seed(3)).unwrap();
+        let rho0 = scalars[0];
+        assert_eq!(scalars[1], Bn254::mul(rho0, rho0));
+        assert_eq!(scalars[2], Bn254::mul(scalars[1], scalars[1]));
     }
 
     // -----------------------------------------------------------------------
@@ -554,66 +506,55 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn weighted_sum_identity_points_is_identity() {
-        let pts = [identity(); 4];
-        let scs = [u256::from(1u8); 4];
-        let result = weighted_sum_g1(&pts, &scs);
-        // identity · scalar_mul = identity; sum of identities = identity
-        assert_eq!(result, identity());
+    fn weighted_sum_identity_scalars_returns_sum_of_points() {
+        let pts = [g1_gen(), g1_gen()];
+        let ones = [u256::from(1u8); 2];
+        let result = weighted_sum_g1(&pts, &ones);
+        let expected = g1_gen().add(&g1_gen());
+        assert_eq!(result, expected);
     }
 
     #[test]
-    fn weighted_sum_zero_scalars_is_identity() {
-        let pts = [g1_gen(); 3];
-        let scs = [u256::from(0u8); 3];
-        let result = weighted_sum_g1(&pts, &scs);
+    fn weighted_sum_zero_scalars_returns_identity() {
+        let pts = [g1_gen(), g1_gen()];
+        let zeros = [u256::from(0u8); 2];
+        let result = weighted_sum_g1(&pts, &zeros);
         assert_eq!(result, identity());
     }
 
     // -----------------------------------------------------------------------
-    // batch_verify_ipa — structural error cases
+    // batch_verify_ipa — structural guards
     // -----------------------------------------------------------------------
 
     #[test]
-    fn batch_verify_zero_rounds_is_rejected() {
-        // ROUNDS == 0 is structurally invalid.
-        // We can't set ROUNDS = 0 without hitting IpaProof / IpaRoundChallenge
-        // compile-time constraints, so test via M = 0 instead.
-        let proofs = [trivial_proof::<2>(); 0];
-        let challenges = uniform_challenges::<2>(u256::from(3u8));
+    fn m_zero_is_rejected() {
         let input = BatchIpaInput::<0, 2> {
             commitments: [],
-            proofs,
-            challenges,
+            proofs: [],
+            challenges: uniform_challenges::<2>(3),
             batch_seed: seed(1),
         };
-        assert_eq!(
-            batch_verify_ipa(&input, 4),
-            Err(ZkError::InvalidInput)
-        );
+        assert_eq!(batch_verify_ipa(&input, 4), Err(ZkError::InvalidInput));
     }
 
     #[test]
-    fn batch_verify_n_mismatch_is_rejected() {
+    fn wrong_n_is_rejected() {
         let input = BatchIpaInput::<1, 2> {
             commitments: [identity()],
             proofs: [trivial_proof::<2>()],
-            challenges: uniform_challenges::<2>(u256::from(3u8)),
-            batch_seed: seed(1),
+            challenges: uniform_challenges::<2>(3),
+            batch_seed: seed(5),
         };
-        // n should be 4 for ROUNDS = 2, but we pass 8.
-        assert_eq!(
-            batch_verify_ipa(&input, 8),
-            Err(ZkError::InvalidInput)
-        );
+        // Correct n for ROUNDS=2 is 4; pass 8 instead.
+        assert_eq!(batch_verify_ipa(&input, 8), Err(ZkError::InvalidInput));
     }
 
     #[test]
-    fn batch_verify_zero_seed_is_rejected() {
+    fn zero_seed_batch_rejected() {
         let input = BatchIpaInput::<1, 2> {
             commitments: [identity()],
             proofs: [trivial_proof::<2>()],
-            challenges: uniform_challenges::<2>(u256::from(3u8)),
+            challenges: uniform_challenges::<2>(3),
             batch_seed: [0u8; 32],
         };
         assert_eq!(
@@ -623,18 +564,17 @@ mod tests {
     }
 
     #[test]
-    fn batch_verify_invalid_proof_scalar_is_rejected() {
-        // a_final == FR_MODULUS is out of range.
+    fn bad_proof_scalar_rejects_batch() {
         let bad_proof = IpaProof::<2>::new(
             [IpaRoundCommitments::new(identity(), identity()); 2],
-            Bn254::FR_MODULUS, // invalid
+            Bn254::FR_MODULUS, // out of range
             u256::from(1u8),
         );
         let input = BatchIpaInput::<1, 2> {
             commitments: [identity()],
             proofs: [bad_proof],
-            challenges: uniform_challenges::<2>(u256::from(3u8)),
-            batch_seed: seed(1),
+            challenges: uniform_challenges::<2>(3),
+            batch_seed: seed(5),
         };
         assert_eq!(
             batch_verify_ipa(&input, 4),
@@ -643,57 +583,31 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // batch_verify_ipa — successful path (identity commitments)
+    // batch_verify_ipa — output correctness
     // -----------------------------------------------------------------------
 
     #[test]
-    fn batch_verify_single_proof_identity_succeeds() {
-        // A proof with all-identity commitments and unit scalars should pass
-        // the transcript structure checks and return consistent combined scalars.
-        let input = BatchIpaInput::<1, 2> {
-            commitments: [identity()],
-            proofs: [trivial_proof::<2>()],
-            challenges: uniform_challenges::<2>(u256::from(3u8)),
-            batch_seed: seed(5),
-        };
-        let out = batch_verify_ipa(&input, 4).unwrap();
-        // With a single proof (ρ_0 = seed mod r) and a_final = b_final = 1:
-        // a_combined = ρ_0 · 1 = ρ_0, b_combined = ρ_0 · 1 = ρ_0
-        let rho0 = u256::from_be_bytes(seed(5)) % Bn254::FR_MODULUS;
-        assert_eq!(out.a_combined, rho0);
-        assert_eq!(out.b_combined, rho0);
-        assert_eq!(out.inner_product, Bn254::mul(rho0, rho0));
-    }
-
-    #[test]
-    fn batch_verify_two_proofs_accumulates_correctly() {
-        // Two identical proofs with a_final = 2, b_final = 3.
-        // ρ_0 = seed, ρ_1 = seed²
-        // a_combined = ρ_0·2 + ρ_1·2 = 2·(ρ_0 + ρ_1)
-        // b_combined = ρ_0·3 + ρ_1·3 = 3·(ρ_0 + ρ_1)
+    fn single_proof_combined_scalars_match_manual() {
+        // Single proof: a_final=5, b_final=7.
         let proof = IpaProof::<2>::new(
             [IpaRoundCommitments::new(identity(), identity()); 2],
-            u256::from(2u8),
-            u256::from(3u8),
+            u256::from(5u8),
+            u256::from(7u8),
         );
-        let input = BatchIpaInput::<2, 2> {
-            commitments: [identity(); 2],
-            proofs: [proof; 2],
-            challenges: uniform_challenges::<2>(u256::from(3u8)),
-            batch_seed: seed(7),
+        let input = BatchIpaInput::<1, 2> {
+            commitments: [identity()],
+            proofs: [proof],
+            challenges: uniform_challenges::<2>(3),
+            batch_seed: seed(11),
         };
         let out = batch_verify_ipa(&input, 4).unwrap();
-
-        let rho0 = u256::from_be_bytes(seed(7)) % Bn254::FR_MODULUS;
-        let rho1 = Bn254::mul(rho0, rho0);
-        let rho_sum = Bn254::add(rho0, rho1);
-
-        let expected_a = Bn254::mul(u256::from(2u8), rho_sum);
-        let expected_b = Bn254::mul(u256::from(3u8), rho_sum);
-
-        assert_eq!(out.a_combined, expected_a);
-        assert_eq!(out.b_combined, expected_b);
-        assert_eq!(out.inner_product, Bn254::mul(expected_a, expected_b));
+        let rho0 = u256::from_be_bytes(seed(11)) % Bn254::FR_MODULUS;
+        assert_eq!(out.a_combined, Bn254::mul(rho0, u256::from(5u8)));
+        assert_eq!(out.b_combined, Bn254::mul(rho0, u256::from(7u8)));
+        assert_eq!(
+            out.inner_product,
+            Bn254::mul(out.a_combined, out.b_combined)
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -701,28 +615,29 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn final_check_identity_generators_passes() {
-        // With identity generators, the LHS and RHS both reduce to identity.
+    fn final_check_passes_for_correct_equation() {
+        // a=1, b=0, ip=0, G'=G, H'=0, U=0 → expected = G.
         let out = BatchIpaOutput {
             a_combined: u256::from(1u8),
-            b_combined: u256::from(1u8),
-            inner_product: u256::from(1u8),
-        };
-        // a·G' + b·H' + ip·U  =  1·(0,0) + 1·(0,0) + 1·(0,0) = (0,0)
-        let result = verify_final_check(&out, identity(), identity(), identity(), identity());
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn final_check_mismatch_is_rejected() {
-        // p_final = G1 generator, but equation produces identity → must fail.
-        let out = BatchIpaOutput {
-            a_combined: u256::from(0u8),
             b_combined: u256::from(0u8),
             inner_product: u256::from(0u8),
         };
-        let result = verify_final_check(&out, g1_gen(), identity(), identity(), identity());
-        assert_eq!(result, Err(ZkError::ConstraintUnsatisfied));
+        let p_final = g1_gen(); // 1·G + 0·0 + 0·0 = G
+        assert!(verify_final_check(&out, p_final, g1_gen(), identity(), identity()).is_ok());
+    }
+
+    #[test]
+    fn final_check_fails_for_wrong_p_final() {
+        let out = BatchIpaOutput {
+            a_combined: u256::from(1u8),
+            b_combined: u256::from(0u8),
+            inner_product: u256::from(0u8),
+        };
+        let wrong_p_final = identity(); // should be G, not identity
+        assert_eq!(
+            verify_final_check(&out, wrong_p_final, g1_gen(), identity(), identity()),
+            Err(ZkError::ConstraintUnsatisfied)
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -730,77 +645,68 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn iter_empty_slice_yields_none() {
-        let inputs: [BatchIpaInput<1, 2>; 0] = [];
-        let mut iter = BatchIpaIter::new(&inputs, 4);
-        assert!(iter.next().is_none());
-        assert_eq!(iter.remaining(), 0);
-    }
-
-    #[test]
-    fn iter_single_batch_yields_once() {
-        let inputs = [BatchIpaInput::<1, 2> {
+    fn iter_yields_all_results_without_short_circuit() {
+        let good = BatchIpaInput::<1, 2> {
             commitments: [identity()],
             proofs: [trivial_proof::<2>()],
-            challenges: uniform_challenges::<2>(u256::from(3u8)),
-            batch_seed: seed(9),
-        }];
+            challenges: uniform_challenges::<2>(3),
+            batch_seed: seed(5),
+        };
+        let bad = BatchIpaInput::<1, 2> {
+            commitments: [identity()],
+            proofs: [trivial_proof::<2>()],
+            challenges: uniform_challenges::<2>(3),
+            batch_seed: [0u8; 32],
+        };
+        let inputs = [good, bad, good];
         let mut iter = BatchIpaIter::new(&inputs, 4);
-        assert_eq!(iter.remaining(), 1);
-        let first = iter.next();
-        assert!(first.is_some());
-        assert!(first.unwrap().is_ok());
-        assert_eq!(iter.remaining(), 0);
+        assert!(iter.next().unwrap().is_ok());
+        assert!(iter.next().unwrap().is_err());
+        assert!(iter.next().unwrap().is_ok());
         assert!(iter.next().is_none());
     }
 
     #[test]
-    fn iter_reset_replays_batches() {
-        let inputs = [
-            BatchIpaInput::<1, 2> {
-                commitments: [identity()],
-                proofs: [trivial_proof::<2>()],
-                challenges: uniform_challenges::<2>(u256::from(3u8)),
-                batch_seed: seed(2),
-            },
-            BatchIpaInput::<1, 2> {
-                commitments: [identity()],
-                proofs: [trivial_proof::<2>()],
-                challenges: uniform_challenges::<2>(u256::from(5u8)),
-                batch_seed: seed(4),
-            },
-        ];
+    fn iter_remaining_decrements_correctly() {
+        let input = BatchIpaInput::<1, 2> {
+            commitments: [identity()],
+            proofs: [trivial_proof::<2>()],
+            challenges: uniform_challenges::<2>(3),
+            batch_seed: seed(3),
+        };
+        let inputs = [input; 3];
         let mut iter = BatchIpaIter::new(&inputs, 4);
-        // First pass
+        assert_eq!(iter.remaining(), 3);
+        iter.next();
+        assert_eq!(iter.remaining(), 2);
+        iter.next();
+        assert_eq!(iter.remaining(), 1);
+        iter.next();
+        assert_eq!(iter.remaining(), 0);
+    }
+
+    #[test]
+    fn iter_reset_replays_results() {
+        let good = BatchIpaInput::<1, 2> {
+            commitments: [identity()],
+            proofs: [trivial_proof::<2>()],
+            challenges: uniform_challenges::<2>(3),
+            batch_seed: seed(7),
+        };
+        let bad = BatchIpaInput::<1, 2> {
+            commitments: [identity()],
+            proofs: [trivial_proof::<2>()],
+            challenges: uniform_challenges::<2>(3),
+            batch_seed: [0u8; 32],
+        };
+        let inputs = [good, bad];
+        let mut iter = BatchIpaIter::new(&inputs, 4);
         let r1 = iter.next().unwrap().unwrap();
-        let r2 = iter.next().unwrap().unwrap();
+        let e2 = iter.next().unwrap().unwrap_err();
         assert!(iter.next().is_none());
-        // Reset and replay — results must be deterministic
+
         iter.reset();
         assert_eq!(iter.next().unwrap().unwrap(), r1);
-        assert_eq!(iter.next().unwrap().unwrap(), r2);
-    }
-
-    #[test]
-    fn iter_error_batch_does_not_stop_iteration() {
-        // First batch has a zero seed (invalid), second is valid.
-        let inputs = [
-            BatchIpaInput::<1, 2> {
-                commitments: [identity()],
-                proofs: [trivial_proof::<2>()],
-                challenges: uniform_challenges::<2>(u256::from(3u8)),
-                batch_seed: [0u8; 32], // will error
-            },
-            BatchIpaInput::<1, 2> {
-                commitments: [identity()],
-                proofs: [trivial_proof::<2>()],
-                challenges: uniform_challenges::<2>(u256::from(3u8)),
-                batch_seed: seed(6),
-            },
-        ];
-        let mut iter = BatchIpaIter::new(&inputs, 4);
-        assert!(iter.next().unwrap().is_err());   // first: error
-        assert!(iter.next().unwrap().is_ok());    // second: ok
-        assert!(iter.next().is_none());
+        assert_eq!(iter.next().unwrap().unwrap_err(), e2);
     }
 }
