@@ -7,7 +7,6 @@ pub mod bulletproofs;
 pub mod hash;
 pub mod poseidon2;
 pub mod rescue;
-pub mod rescue_prime;
 /// Cryptographic memory hygiene: volatile-zeroing RAII guards (Issue #466).
 ///
 /// Exports [`zeroize::SensitiveBuffer`] and [`zeroize::sensitive_vec::SensitiveVec`]
