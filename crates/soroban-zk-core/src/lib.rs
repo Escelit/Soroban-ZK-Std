@@ -4,11 +4,9 @@ use ethnum::u256;
 extern crate self as zk_core;
 
 pub mod bulletproofs;
-pub mod bulletproofs_wasm;
 pub mod hash;
 pub mod poseidon2;
 pub mod rescue;
-pub mod rescue_prime;
 /// Cryptographic memory hygiene: volatile-zeroing RAII guards (Issue #466).
 ///
 /// Exports [`zeroize::SensitiveBuffer`] and [`zeroize::sensitive_vec::SensitiveVec`]
@@ -21,6 +19,9 @@ pub mod zeroize;
 /// `words_to_field`, and related helpers for converting BN254 field elements
 /// into contiguous `[u32; 8]` blocks ready for SHA-256 hashing.
 pub mod sha256_words;
+/// SHA-256 padding validators (Issue #456): FIPS-180-4 compliant message
+/// padding that is `no_std`, allocation-free and constant-length.
+pub mod sha256_padding;
 
 pub mod elgamal {
     use super::*;
